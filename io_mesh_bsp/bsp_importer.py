@@ -127,7 +127,7 @@ transparent_index = 255 # transparent color
 
 # functions
 def print_debug(string):
-    debug = False
+    debug = True
     if debug:
         print(string)
 
@@ -170,7 +170,7 @@ def load_palette(filepath):
         return colors
 
 
-def generate_mask(fg_indices, width, height, black_background=True):
+def generate_mask(original, fg_indices, width, height, black_background=True):
     fg = 1.0 if black_background else 0.0
     bg = 0.0 if black_background else 1.0
 
@@ -180,9 +180,9 @@ def generate_mask(fg_indices, width, height, black_background=True):
         x = i % width
         y = (height - 1) - int((i - x) / width) # reverse y
         idx = (width * y + x) * 4
-        mask_pixels[idx] = fg
-        mask_pixels[idx+1] = fg
-        mask_pixels[idx+2] = fg
+        mask_pixels[idx] = original[idx]
+        mask_pixels[idx+1] = original[idx+1]
+        mask_pixels[idx+2] = original[idx+2]
         mask_pixels[idx+3] = 1.0
 
     return mask_pixels
@@ -253,14 +253,16 @@ def load_textures(context, filepath, load_miptex=True):
                 for x in range(miptex.width):
                     idx = i + x
                     c = pixels_pal[idx]
+                    if c == transparent_index:
+                        alpha = 0.0
+                        c = 0
+                    else:
+                        alpha = 1.0
 
-                    # masks
-                    alpha = 1.0
+                    # masksp
                     if create_mask:
                         if is_transparent:
-                            if c == transparent_index:
-                                alpha = 0.0
-                            elif c >= fullbright_index:
+                            if c >= fullbright_index:
                                 fullbright.append(idx)
                         elif c >= fullbright_index:
                             fullbright.append(idx)
@@ -284,7 +286,7 @@ def load_textures(context, filepath, load_miptex=True):
                 texture_item['is_emissive'] = True
                 if len(fullbright) < num_pixels: # no mask if all pixels are fullbright
                     mask = bpy.data.images.new(miptex_name + "_emission", width=miptex.width, height=miptex.height)
-                    mask.pixels = generate_mask(fullbright, miptex.width, miptex.height, black_background=True)
+                    mask.pixels = generate_mask(image.pixels, fullbright, miptex.width, miptex.height, black_background=True)
                     texture_item['mask'] = mask
             texture_data.append(texture_item)
 
@@ -360,6 +362,10 @@ def light_add(entity, scale, light_scale):
     angle[2] = parse_float_safe(entity, 'angle', 0)
     light = parse_float_safe(entity, 'light', 200)
     color = parse_vec3_safe(entity, '_color', 1, [255, 255, 255])
+    if all(x <= 1.0 for x in color):
+        color[0] *= 255
+        color[1] *= 255
+        color[2] *= 255
 
     # Create a light (not yet linked to the scene)
     classname = entity['classname']
@@ -443,48 +449,30 @@ def create_materials(texture_data, options):
             mask.pack()
             mask_texture = bpy.data.textures.new(name + '_emission', type='IMAGE')
             mask_texture.image = mask
-            mask_texture.use_alpha = False
 
         # set up node tree
         node_tree = mat.node_tree
         main_shader = node_tree.nodes['Principled BSDF']
         output_node = node_tree.nodes['Material Output']
-        node_tree.nodes.remove(main_shader) # Replace with Diffuse
-        if texture_entry['is_emissive'] and mask is None:
-            main_shader = node_tree.nodes.new('ShaderNodeEmission')
-        else:
-            main_shader = node_tree.nodes.new('ShaderNodeBsdfDiffuse')
+        main_shader.inputs["Roughness"].default_value = 1
+        main_shader.inputs["Specular"].default_value = 0
 
         image_node = node_tree.nodes.new('ShaderNodeTexImage')
         image_node.image = image
         image_node.interpolation = 'Closest'
         image_node.location = [-256.0, 300.0]
         node_tree.links.new(image_node.outputs['Color'], main_shader.inputs[0])
+        if texture_entry['use_alpha']:
+            node_tree.links.new(image_node.outputs['Alpha'], main_shader.inputs['Alpha'])
 
         # emission mask shader
         if mask is not None:
             mask_node = node_tree.nodes.new('ShaderNodeTexImage')
             mask_node.image = mask
             mask_node.interpolation = 'Closest'
-            mask_mix_shader = node_tree.nodes.new('ShaderNodeMixShader')
-            mask_emission_shader = node_tree.nodes.new('ShaderNodeEmission')
-            node_tree.links.new(image_node.outputs['Color'], mask_emission_shader.inputs[0])
-            node_tree.links.new(mask_node.outputs['Color'], mask_mix_shader.inputs[0])
-            node_tree.links.new(main_shader.outputs[0], mask_mix_shader.inputs[1])
-            node_tree.links.new(mask_emission_shader.outputs[0], mask_mix_shader.inputs[2])
-            main_shader = mask_mix_shader
+            node_tree.links.new(mask_node.outputs['Color'], main_shader.inputs['Emission'])
 
         node_tree.links.new(main_shader.outputs[0], output_node.inputs['Surface'])
-
-        # set up transparent textures
-        if texture_entry['use_alpha']:
-            mat.blend_method = 'CLIP' # Eevee material setting
-            mix_shader = node_tree.nodes.new('ShaderNodeMixShader')
-            trans_shader = node_tree.nodes.new('ShaderNodeBsdfTransparent')
-            node_tree.links.new(image_node.outputs['Alpha'], mix_shader.inputs[0])
-            node_tree.links.new(trans_shader.outputs[0], mix_shader.inputs[1])
-            node_tree.links.new(main_shader.outputs[0], mix_shader.inputs[2])
-            node_tree.links.new(mix_shader.outputs[0], output_node.inputs['Surface'])
 
 
 def import_bsp(self, context, filepath, options):
